@@ -895,6 +895,50 @@ describe("pulse-core EventEngine", () => {
     });
   });
 
+  describe("bump_sequence → account.bump_sequence", () => {
+    it("emits account.bump_sequence with the new sequence number", () => {
+      const engine = new EventEngine({ network: "testnet" });
+      const watcher = engine.subscribe("GSRC");
+      const handler = vi.fn();
+      watcher.on("account.bump_sequence", handler);
+
+      engine.start();
+      latestStream().handlers.onmessage({
+        type: "bump_sequence",
+        source_account: "GSRC",
+        bump_to: "123456789",
+        created_at: "2026-04-28T14:00:00.000Z",
+      });
+
+      expect(handler).toHaveBeenCalledOnce();
+      expect(handler).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "account.bump_sequence",
+          source: "GSRC",
+          bump_to: "123456789",
+          timestamp: "2026-04-28T14:00:00.000Z",
+        })
+      );
+    });
+
+    it("does not emit account.bump_sequence if source_account is missing", () => {
+      const engine = new EventEngine({ network: "testnet" });
+      const watcher = engine.subscribe("GSRC");
+      const handler = vi.fn();
+      watcher.on("account.bump_sequence", handler);
+
+      engine.start();
+      latestStream().handlers.onmessage({
+        type: "bump_sequence",
+        bump_to: "123456789",
+        created_at: "2026-04-28T14:00:00.000Z",
+        // missing source_account
+      });
+
+      expect(handler).not.toHaveBeenCalled();
+    });
+  });
+
   describe("change_trust → trustline.*", () => {
     function makeChangeTrustRecord(overrides: Record<string, unknown>): Record<string, unknown> {
       return {

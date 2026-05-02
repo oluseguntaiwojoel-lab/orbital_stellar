@@ -27,6 +27,7 @@ export type WatcherNotificationType =
   | "engine.reconnected";
 
 export type OfferEventType = "offer.created" | "offer.updated" | "offer.deleted";
+export type BumpSequenceEventType = "account.bump_sequence";
 
 /**
  * Represents a signer in Stellar account options.
@@ -109,6 +110,14 @@ export type OfferEvent = {
   raw: unknown;
 };
 
+export type BumpSequenceEvent = {
+  type: BumpSequenceEventType;
+  source: string;
+  bump_to: string;
+  timestamp: string;
+  raw: unknown;
+};
+
 /**
  * A normalized account creation event from the Stellar network.
  */
@@ -170,7 +179,8 @@ export type NormalizedEvent =
   | AccountCreatedEvent
   | TrustlineEvent
   | AccountMergeEvent
-  | OfferEvent;
+  | OfferEvent
+  | BumpSequenceEvent;
 
 /**
  * A notification emitted by the EventEngine during reconnection attempts.

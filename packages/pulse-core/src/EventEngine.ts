@@ -6,6 +6,8 @@ import type {
   AccountMergeEvent,
   AccountOptionsChanges,
   AccountOptionsEvent,
+  BumpSequenceEvent,
+  BumpSequenceEventType,
   CoreConfig,
   EngineStatus,
   Network,
@@ -30,7 +32,8 @@ type NormalizedEventOrPending =
   | AccountCreatedEvent
   | TrustlineEvent
   | AccountMergeEvent
-  | OfferEvent;
+  | OfferEvent
+  | BumpSequenceEvent;
 
 type StreamCallbacks = {
   onmessage: (record: unknown) => void;
@@ -330,6 +333,10 @@ export class EventEngine {
       return this.normalizeOffer(r, record);
     }
 
+    if (r.type === "bump_sequence") {
+      return this.normalizeBumpSequence(r, record);
+    }
+
     if (r.type === "change_trust") {
       return this.normalizeChangeTrust(r, record);
     }
@@ -407,6 +414,22 @@ export class EventEngine {
       funder: r.funder,
       account: r.account,
       starting_balance: r.starting_balance,
+      timestamp: r.created_at,
+      raw,
+    };
+  }
+
+  private normalizeBumpSequence(
+    r: Record<string, unknown>,
+    raw: unknown
+  ): BumpSequenceEvent | null {
+    if (typeof r.source_account !== "string" || typeof r.created_at !== "string") {
+      return null;
+    }
+    return {
+      type: "account.bump_sequence",
+      source: r.source_account,
+      bump_to: r.bump_to as string,
       timestamp: r.created_at,
       raw,
     };
@@ -581,6 +604,15 @@ export class EventEngine {
       if (destinationWatcher && this.passesFilter(event.destination, event)) {
         destinationWatcher.emit("account.merged", event);
         destinationWatcher.emit("*", event);
+      }
+      return;
+    }
+
+    if (event.type === "account.bump_sequence") {
+      const watcher = this.registry.get(event.source);
+      if (watcher && this.passesFilter(event.source, event)) {
+        watcher.emit("account.bump_sequence", event);
+        watcher.emit("*", event);
       }
       return;
     }
