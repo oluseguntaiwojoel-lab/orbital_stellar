@@ -215,7 +215,7 @@ export class EventEngine {
       },
       onerror: (error) => {
         this.log.error(`[pulse-core] SSE error: ${error}`);
-        this.handleStreamError();
+        this.handleStreamError(error);
       },
     };
 
@@ -225,7 +225,7 @@ export class EventEngine {
       .stream(callbacks);
   }
 
-  private handleStreamError(): void {
+  private handleStreamError(error?: unknown): void {
     if (this.reconnectTimer) {
       return;
     }
@@ -242,26 +242,126 @@ export class EventEngine {
 
     this.reconnectAttempt = nextAttempt;
 
-    const exponentialDelay = Math.min(
-      this.reconnectConfig.initialDelayMs * 2 ** (nextAttempt - 1),
-      this.reconnectConfig.maxDelayMs
-    );
-    const delayMs = Math.floor(Math.random() * exponentialDelay);
+    const isRateLimited = this.isRateLimitError(error);
 
-    // Log and emit the attempt number that will be used for this reconnect cycle.
-    // This same number will appear in the engine.reconnected notification if successful.
-    this.log.warn(`[pulse-core] SSE reconnect attempt ${nextAttempt} scheduled in ${delayMs}ms.`);
-    this.notifyWatchers("engine.reconnecting", {
-      type: "engine.reconnecting",
-      attempt: nextAttempt,
-      delayMs,
-      emittedAt: new Date().toISOString(),
-    });
+    let delayMs: number;
+    if (isRateLimited) {
+      const retryAfterMs = this.parseRetryAfterMs(error);
+      delayMs = retryAfterMs ?? 60000;
+
+      this.log.warn(`[pulse-core] SSE rate limited by Horizon, reconnect scheduled in ${delayMs}ms.`);
+      this.notifyWatchers("engine.rate_limited", {
+        type: "engine.rate_limited",
+        attempt: nextAttempt,
+        delayMs,
+        emittedAt: new Date().toISOString(),
+      });
+    } else {
+      const exponentialDelay = Math.min(
+        this.reconnectConfig.initialDelayMs * 2 ** (nextAttempt - 1),
+        this.reconnectConfig.maxDelayMs
+      );
+      delayMs = Math.floor(Math.random() * exponentialDelay);
+
+      // Log and emit the attempt number that will be used for this reconnect cycle.
+      // This same number will appear in the engine.reconnected notification if successful.
+      this.log.warn(`[pulse-core] SSE reconnect attempt ${nextAttempt} scheduled in ${delayMs}ms.`);
+      this.notifyWatchers("engine.reconnecting", {
+        type: "engine.reconnecting",
+        attempt: nextAttempt,
+        delayMs,
+        emittedAt: new Date().toISOString(),
+      });
+    }
 
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       this.openStream(true);
     }, delayMs);
+  }
+
+  private isRateLimitError(error: unknown): boolean {
+    const status = this.extractStatus(error);
+    return status === 429;
+  }
+
+  private extractStatus(error: unknown): number | undefined {
+    const e = error as Record<string, unknown>;
+    if (typeof e.status === "number") {
+      return e.status;
+    }
+    if (typeof e.statusCode === "number") {
+      return e.statusCode;
+    }
+
+    const response = e.response as Record<string, unknown> | undefined;
+    if (response) {
+      if (typeof response.status === "number") {
+        return response.status;
+      }
+      if (typeof response.statusCode === "number") {
+        return response.statusCode;
+      }
+    }
+
+    return undefined;
+  }
+
+  private parseRetryAfterMs(error: unknown): number | null {
+    const header = this.getHeaderValue(error, "Retry-After");
+    if (!header) {
+      return null;
+    }
+
+    const seconds = Number.parseInt(header, 10);
+    if (!Number.isNaN(seconds)) {
+      return seconds * 1000;
+    }
+
+    const date = new Date(header).getTime();
+    return Number.isNaN(date) ? null : Math.max(date - Date.now(), 0);
+  }
+
+  private getHeaderValue(error: unknown, headerName: string): string | null {
+    const e = error as Record<string, unknown>;
+    const directHeader = typeof e[headerName.toLowerCase()] === "string"
+      ? (e[headerName.toLowerCase()] as string)
+      : typeof e[headerName] === "string"
+      ? (e[headerName] as string)
+      : null;
+    if (directHeader) {
+      return directHeader;
+    }
+
+    const response = e.response as Record<string, unknown> | undefined;
+    const candidates = [e.headers, response?.headers];
+
+    for (const headers of candidates) {
+      if (!headers || typeof headers !== "object") {
+        continue;
+      }
+
+      if (typeof (headers as any).get === "function") {
+        const value = (headers as any).get(headerName) ??
+          (headers as any).get(headerName.toLowerCase());
+        if (typeof value === "string") {
+          return value;
+        }
+      }
+
+      const value =
+        typeof (headers as any)[headerName] === "string"
+          ? (headers as any)[headerName]
+          : typeof (headers as any)[headerName.toLowerCase()] === "string"
+          ? (headers as any)[headerName.toLowerCase()]
+          : null;
+
+      if (typeof value === "string") {
+        return value;
+      }
+    }
+
+    return null;
   }
 
   private closeStream(): void {
