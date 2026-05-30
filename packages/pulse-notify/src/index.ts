@@ -114,3 +114,7 @@ export function useStellarPayment(serverUrl: string, address: string) {
 export function useStellarActivity(serverUrl: string, address: string) {
   return useStellarEvent(serverUrl, address, { event: "*" });
 }
+
+// DevTools
+export { __OrbitalDevTools } from "./devtools.js";
+export type { DevToolsConnection } from "./devtools.js";

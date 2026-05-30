@@ -17,9 +17,13 @@ type ConnectionEntry = {
   source: EventSource;
   subscribers: Set<ConnectionSubscriber>;
   connected: boolean;
+  serverUrl: string;
+  address: string;
+  lastEventAt: number | null;
 };
 
 const pool = new Map<string, ConnectionEntry>();
+const devtoolsObservers = new Set<() => void>();
 
 function getConnectionKey({ serverUrl, address, token }: ConnectionKey): string {
   return JSON.stringify([serverUrl, address, token ?? ""]);
@@ -39,6 +43,12 @@ function notifySubscribers(
   }
 }
 
+function notifyDevtools() {
+  for (const observer of devtoolsObservers) {
+    observer();
+  }
+}
+
 export function acquireEventConnection(
   key: ConnectionKey,
   subscriber: ConnectionSubscriber
@@ -51,17 +61,23 @@ export function acquireEventConnection(
       source: new EventSource(getEventSourceUrl(key)),
       subscribers: new Set(),
       connected: false,
+      serverUrl: key.serverUrl,
+      address: key.address,
+      lastEventAt: null,
     };
 
     newEntry.source.onopen = () => {
       newEntry.connected = true;
       notifySubscribers(newEntry, (current) => current.onOpen());
+      notifyDevtools();
     };
 
     newEntry.source.onmessage = (message) => {
       try {
         const event = JSON.parse(message.data) as NormalizedEvent;
+        newEntry.lastEventAt = Date.now();
         notifySubscribers(newEntry, (current) => current.onEvent(event));
+        notifyDevtools();
       } catch {
         notifySubscribers(newEntry, (current) => current.onParseError());
       }
@@ -70,6 +86,7 @@ export function acquireEventConnection(
     newEntry.source.onerror = () => {
       newEntry.connected = false;
       notifySubscribers(newEntry, (current) => current.onError());
+      notifyDevtools();
     };
 
     pool.set(poolKey, newEntry);
@@ -86,6 +103,7 @@ export function acquireEventConnection(
       if (entry.subscribers.size === 0) {
         entry.source.close();
         pool.delete(poolKey);
+        notifyDevtools();
       }
     },
   };
@@ -100,4 +118,31 @@ export function __resetConnectionPoolForTests() {
     entry.source.close();
   }
   pool.clear();
+}
+
+/**
+ * DevTools API: Get a snapshot of all active connections.
+ * @internal
+ */
+export function __devtoolsGetConnections() {
+  return Array.from(pool.entries()).map(([key, entry]) => ({
+    key,
+    serverUrl: entry.serverUrl,
+    address: entry.address,
+    connected: entry.connected,
+    subscriberCount: entry.subscribers.size,
+    lastEventAt: entry.lastEventAt,
+  }));
+}
+
+/**
+ * DevTools API: Subscribe to pool changes for real-time updates.
+ * Returns an unsubscribe function.
+ * @internal
+ */
+export function __devtoolsSubscribe(callback: () => void): () => void {
+  devtoolsObservers.add(callback);
+  return () => {
+    devtoolsObservers.delete(callback);
+  };
 }
