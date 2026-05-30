@@ -60,9 +60,24 @@ export function useStellarEvent<T extends NormalizedEvent = NormalizedEvent>(
     const url = token ? `${base}?token=${encodeURIComponent(token)}` : base;
 
     const source = new EventSource(url);
+    let __pn_dev_id: string | undefined;
+
+    // In development, dynamically register this connection with the devtools
+    if (process.env.NODE_ENV !== "production" && typeof window !== "undefined") {
+      import("./devtools").then((mod) => {
+        try {
+          __pn_dev_id = mod.registerConnection({ serverUrl, address: addr, url, connected: false, error: null });
+        } catch (e) {
+          // ignore
+        }
+      });
+    }
 
     source.onopen = () => {
       setState((prev) => ({ ...prev, connected: true, error: null }));
+      if (__pn_dev_id) {
+        import("./devtools").then((mod) => mod.updateConnection(__pn_dev_id!, { connected: true, error: null }));
+      }
     };
 
     source.onmessage = (e) => {
@@ -79,6 +94,10 @@ export function useStellarEvent<T extends NormalizedEvent = NormalizedEvent>(
 
         if (!allowed) return;
 
+        if (__pn_dev_id) {
+          import("./devtools").then((mod) => mod.updateConnection(__pn_dev_id!, { lastEvent: Date.now() }));
+        }
+
         setState((prev) => ({ ...prev, event: incoming as T }));
       } catch {
         setState((prev) => ({ ...prev, error: "Failed to parse event" }));
@@ -91,10 +110,16 @@ export function useStellarEvent<T extends NormalizedEvent = NormalizedEvent>(
         connected: false,
         error: "Connection lost — retrying...",
       }));
+      if (__pn_dev_id) {
+        import("./devtools").then((mod) => mod.updateConnection(__pn_dev_id!, { connected: false, error: "Connection lost — retrying..." }));
+      }
     };
 
     return () => {
       source.close();
+      if (__pn_dev_id) {
+        import("./devtools").then((mod) => mod.unregisterConnection(__pn_dev_id!)).catch(() => {});
+      }
     };
     // ✅ eventKey is a serialised string — stable even when the caller passes
     // an array literal, which would otherwise be a new reference every render.
@@ -114,3 +139,5 @@ export function useStellarPayment(serverUrl: string, address: string) {
 export function useStellarActivity(serverUrl: string, address: string) {
   return useStellarEvent(serverUrl, address, { event: "*" });
 }
+
+export { PulseNotifyDevtools } from "./devtools";
