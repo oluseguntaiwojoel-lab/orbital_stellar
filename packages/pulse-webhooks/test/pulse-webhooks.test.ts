@@ -243,9 +243,19 @@ describe("pulse-webhooks WebhookDelivery", () => {
     const fetchMock = vi.fn().mockRejectedValue(new Error("network down"));
     vi.stubGlobal("fetch", fetchMock);
 
-    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
-
     const watcher = new Watcher("GABC");
+    const deliveryAttempts: { time: number; attempt: number }[] = [];
+
+    // Track when fetch is called to verify jitter is applied
+    const originalFetch = fetch;
+    vi.stubGlobal("fetch", (url: string) => {
+      deliveryAttempts.push({
+        time: Date.now(),
+        attempt: deliveryAttempts.length + 1,
+      });
+      return Promise.reject(new Error("network down"));
+    });
+
     new WebhookDelivery(watcher, {
       url: "https://example.com/webhooks/stellar",
       secret: "top-secret",
@@ -253,25 +263,144 @@ describe("pulse-webhooks WebhookDelivery", () => {
       random: seededRandom,
     });
 
+    const startTime = Date.now();
     watcher.emit("*", deliveryEvent);
     await flushAsyncWork();
 
-    const allCalls = setTimeoutSpy.mock.calls.filter((call: any[]) => call[1] !== 10000);
-    expect(allCalls.length).toBe(1);
+    // Initial attempt
+    expect(deliveryAttempts.length).toBe(1);
 
-    const attempt1Delay = allCalls[0][1] as number;
-    expect(attempt1Delay).toBeGreaterThanOrEqual(0);
-    expect(attempt1Delay).toBeLessThan(1000);
+    // Advance to trigger first retry (should be within jitter bounds for 1st retry: 0-1000ms)
+    vi.advanceTimersByTime(600); // Move past the initial jitter delay
+    await flushAsyncWork();
+    expect(deliveryAttempts.length).toBeGreaterThanOrEqual(2);
 
-    vi.advanceTimersByTime(attempt1Delay + 1);
+    const firstRetryTime = deliveryAttempts[1].time - startTime;
+    expect(firstRetryTime).toBeGreaterThanOrEqual(0);
+    expect(firstRetryTime).toBeLessThan(1000);
+  });
+
+  it("does not dequeue a record whose nextRetryAt is in the future", async () => {
+    vi.setSystemTime(new Date("2026-04-27T00:00:00.000Z"));
+    const fetchMock = vi.fn().mockRejectedValue(new Error("network down"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const watcher = new Watcher("GABC");
+    new WebhookDelivery(watcher, {
+      url: "https://example.com/hook",
+      secret: "top-secret",
+      retries: 2,
+      random: () => 0.5, // Use 50% jitter
+    });
+
+    watcher.emit("*", deliveryEvent);
     await flushAsyncWork();
 
-    const allCallsAfterRetry = setTimeoutSpy.mock.calls.filter((call: any[]) => call[1] !== 10000);
-    expect(allCallsAfterRetry.length).toBe(2);
+    // Initial attempt failed, should enqueue retry with nextRetryAt = now + (2^0 * 1000 * 0.5) = now + 500ms
+    expect(fetchMock).toHaveBeenCalledTimes(1);
 
-    const attempt2Delay = allCallsAfterRetry[1][1] as number;
-    expect(attempt2Delay).toBeGreaterThanOrEqual(0);
-    expect(attempt2Delay).toBeLessThan(2000);
+    // Advance less than 500ms - retry should not have been processed
+    vi.advanceTimersByTime(300);
+    await flushAsyncWork();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1); // Still only the initial attempt
+
+    // Advance past 500ms - retry should now be processed
+    vi.advanceTimersByTime(250); // Total 550ms
+    await flushAsyncWork();
+
+    expect(fetchMock).toHaveBeenCalledTimes(2); // Initial + 1 retry
+  });
+
+  it("dequeues records in nextRetryAt order regardless of enqueue order", async () => {
+    vi.setSystemTime(new Date("2026-04-27T00:00:00.000Z"));
+    const deliveryLog: { url: string; attempt: number; time: number }[] = [];
+
+    const fetchMock = vi.fn((url: string) => {
+      deliveryLog.push({
+        url,
+        attempt: deliveryLog.filter((d) => d.url === url).length + 1,
+        time: Date.now(),
+      });
+      return Promise.reject(new Error("network down"));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const watcher = new Watcher("GABC");
+    let randomCallCount = 0;
+    const seededRandom = () => {
+      // Generate different jitter values to create different nextRetryAt times
+      const values = [0.2, 0.8]; // 200ms and 800ms delays
+      return values[randomCallCount++ % values.length];
+    };
+
+    new WebhookDelivery(watcher, {
+      url: [
+        "https://example.com/hook1",
+        "https://example.com/hook2",
+      ],
+      secret: "top-secret",
+      retries: 2,
+      random: seededRandom,
+    });
+
+    watcher.emit("*", { ...deliveryEvent, raw: { id: "evt_1" } });
+    await flushAsyncWork();
+
+    // Both URLs have failed initial delivery
+    // hook1 will retry at now + 200ms
+    // hook2 will retry at now + 800ms
+
+    // Advance to 300ms - only hook1 retry should execute
+    vi.advanceTimersByTime(300);
+    await flushAsyncWork();
+
+    const hook1Attempt2 = deliveryLog.find((d) => d.url.includes("hook1") && d.attempt === 2);
+    const hook2Attempt2 = deliveryLog.find((d) => d.url.includes("hook2") && d.attempt === 2);
+
+    expect(hook1Attempt2).toBeDefined(); // hook1 retry executed
+    expect(hook2Attempt2).toBeUndefined(); // hook2 retry not yet executed
+
+    // Advance to 850ms total - now hook2 retry should execute
+    vi.advanceTimersByTime(550);
+    await flushAsyncWork();
+
+    const hook2Attempt2After = deliveryLog.find(
+      (d) => d.url.includes("hook2") && d.attempt === 2,
+    );
+    expect(hook2Attempt2After).toBeDefined(); // hook2 retry executed
+  });
+
+  it("respects a 30-second retry delay for a record enqueued with nextRetryAt = now + 30s", async () => {
+    vi.setSystemTime(new Date("2026-04-27T00:00:00.000Z"));
+    const fetchMock = vi.fn().mockRejectedValue(new Error("network down"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const watcher = new Watcher("GABC");
+    new WebhookDelivery(watcher, {
+      url: "https://example.com/hook",
+      secret: "top-secret",
+      retries: 2,
+      random: () => 30_000, // Force 30-second jitter
+    });
+
+    watcher.emit("*", deliveryEvent);
+    await flushAsyncWork();
+
+    // Initial attempt failed, queued with nextRetryAt = now + 30_000ms
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // Advance 29.9 seconds - should not retry yet
+    vi.advanceTimersByTime(29_900);
+    await flushAsyncWork();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1); // Still no retry
+
+    // Advance 100ms more (30 seconds total) - retry should execute
+    vi.advanceTimersByTime(100);
+    await flushAsyncWork();
+
+    expect(fetchMock).toHaveBeenCalledTimes(2); // Initial + 1 retry
   });
 });
 
