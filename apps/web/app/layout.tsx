@@ -3,6 +3,7 @@ import { Instrument_Serif } from 'next/font/google'
 import { GeistSans } from 'geist/font/sans'
 import { GeistMono } from 'geist/font/mono'
 import './globals.css'
+import DevtoolsMount from '../components/DevtoolsMount'
 
 const instrumentSerif = Instrument_Serif({
   subsets: ['latin'],
@@ -28,7 +29,10 @@ export default function RootLayout({
       lang="en"
       className={`${instrumentSerif.variable} ${GeistSans.variable} ${GeistMono.variable}`}
     >
-      <body>{children}</body>
+      <body>
+        {children}
+        <DevtoolsMount />
+      </body>
     </html>
   )
 }
