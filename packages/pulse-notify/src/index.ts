@@ -186,6 +186,7 @@ export {
   type StellarConnectionStatusProps,
   type StellarConnectionStatusState,
 } from "./StellarConnectionStatus.js";
+export { DevToolsPanel } from "./devtools.js";
 
 export type UseHistoryOptions = {
   token?: string;

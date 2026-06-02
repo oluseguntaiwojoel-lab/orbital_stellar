@@ -27,6 +27,11 @@ type CacheEntry = {
   source: EventSource;
   /** Latest event stored so re-renders after the first one are synchronous. */
   latestEvent: NormalizedEvent | null;
+  serverUrl: string;
+  address: string;
+  eventKey: string;
+  token: string | undefined;
+  url: string;
 };
 
 const cache = new Map<string, CacheEntry>();
@@ -45,7 +50,8 @@ function openEntry(
   address: string,
   eventType: string | string[],
   token: string | undefined,
-  cacheKey: string
+  cacheKey: string,
+  eventKey: string
 ): CacheEntry {
   const base = `${serverUrl}/events/${address}`;
   const url = token ? `${base}?token=${encodeURIComponent(token)}` : base;
@@ -62,6 +68,11 @@ function openEntry(
     refCount: 0,
     source,
     latestEvent: null,
+    serverUrl,
+    address,
+    eventKey,
+    token,
+    url,
   };
 
   source.onmessage = (e) => {
@@ -95,6 +106,30 @@ function openEntry(
 
   cache.set(cacheKey, entry);
   return entry;
+}
+
+export type SuspenseConnectionDebugEntry = {
+  serverUrl: string;
+  address: string;
+  eventKey: string;
+  token?: string;
+  status: "pending" | "ready";
+  refCount: number;
+  lastEventAt: string | null;
+  url: string;
+};
+
+export function __getSuspenseConnectionSnapshot(): SuspenseConnectionDebugEntry[] {
+  return Array.from(cache.values()).map((entry) => ({
+    serverUrl: entry.serverUrl,
+    address: entry.address,
+    eventKey: entry.eventKey,
+    token: entry.token,
+    status: entry.data.status,
+    refCount: entry.refCount,
+    lastEventAt: entry.latestEvent?.timestamp ?? null,
+    url: entry.url,
+  }));
 }
 
 function releaseEntry(cacheKey: string): void {
@@ -210,7 +245,7 @@ export function useStellarEventSuspense<
   // thrown promise is available on the very first render.
   let entry = cache.get(cacheKey);
   if (!entry) {
-    entry = openEntry(serverUrl, addr, eventType, token, cacheKey);
+    entry = openEntry(serverUrl, addr, eventType, token, cacheKey, eventKey);
   }
 
   // Track whether this render is the first time this hook instance has seen
