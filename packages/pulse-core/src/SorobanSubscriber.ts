@@ -42,6 +42,8 @@ class LruSet {
   }
 }
 
+import type { CursorStore } from "./index.js";
+
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
@@ -68,7 +70,8 @@ export interface SorobanRpcLike {
 
 export interface SorobanSubscriberOptions {
   rpc: SorobanRpcLike;
-  cursorStore: CursorStoreLike;
+  cursorStore: CursorStoreLike | CursorStore;
+  streamKey?: string;
   onEvent: (event: SorobanEvent) => Promise<void>;
   pageSize?: number;
   /** Maximum number of recently-seen event IDs kept in the dedup window. Defaults to 1024. */
@@ -81,7 +84,8 @@ export interface SorobanSubscriberOptions {
 
 export class SorobanSubscriber {
   private readonly rpc: SorobanRpcLike;
-  private readonly cursorStore: CursorStoreLike;
+  private readonly cursorStore: CursorStoreLike | CursorStore;
+  private readonly streamKey?: string;
   private readonly onEvent: (event: SorobanEvent) => Promise<void>;
   private readonly pageSize: number;
   private readonly seen: LruSet;
@@ -94,6 +98,7 @@ export class SorobanSubscriber {
   constructor(options: SorobanSubscriberOptions) {
     this.rpc = options.rpc;
     this.cursorStore = options.cursorStore;
+    this.streamKey = options.streamKey;
     this.onEvent = options.onEvent;
     this.pageSize = options.pageSize ?? 100;
     this.seen = new LruSet(options.dedupCacheSize ?? 1024);
@@ -130,7 +135,7 @@ export class SorobanSubscriber {
   }
 
   private async _doPoll(signal: AbortSignal): Promise<void> {
-    const currentCursor = await this.cursorStore.getCursor();
+    const currentCursor = await this.getCursorValue();
 
     let result: { events: SorobanEvent[] };
     try {
@@ -147,10 +152,44 @@ export class SorobanSubscriber {
         if (this.seen.has(event.id)) continue;
         await this.onEvent(event);
         this.seen.add(event.id);
-        await this.cursorStore.saveCursor(event.pagingToken);
+        await this.saveCursorValue(event.pagingToken);
       }
     } finally {
       this.isPolling = false;
+    }
+  }
+
+  private isDurableCursorStore(store: CursorStoreLike | CursorStore): store is CursorStore {
+    return typeof (store as CursorStore).get === "function" && typeof (store as CursorStore).set === "function";
+  }
+
+  private async getCursorValue(): Promise<string | undefined> {
+    if (this.isDurableCursorStore(this.cursorStore)) {
+      const cursor = await this.cursorStore.get(this.streamKey ?? "soroban");
+      return cursor ?? undefined;
+    }
+    try {
+      return await this.cursorStore.getCursor();
+    } catch (err) {
+      console.warn("[pulse-core] Soroban cursorStore.getCursor() failed; starting from the beginning.", err);
+      return undefined;
+    }
+  }
+
+  private async saveCursorValue(cursor: string): Promise<void> {
+    if (this.isDurableCursorStore(this.cursorStore)) {
+      try {
+        await this.cursorStore.set(this.streamKey ?? "soroban", cursor);
+      } catch (err) {
+        console.warn("[pulse-core] Soroban cursorStore.set() failed.", err);
+      }
+      return;
+    }
+
+    try {
+      await this.cursorStore.saveCursor(cursor);
+    } catch (err) {
+      console.warn("[pulse-core] Soroban cursorStore.saveCursor() failed.", err);
     }
   }
 

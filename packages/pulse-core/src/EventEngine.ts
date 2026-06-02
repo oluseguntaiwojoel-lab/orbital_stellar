@@ -101,7 +101,7 @@ export class EventEngine {
   private filters: Map<string, (event: NormalizedEvent) => boolean> = new Map();
   private log: Logger;
   private cursorStore?: CursorStore;
-  private streamKey: string;
+  private readonly network: Network;
   private cursorFailureThreshold: number;
   private consecutiveCursorFailures = 0;
   private isCursorStoreUnhealthy = false;
@@ -136,7 +136,7 @@ export class EventEngine {
     };
     this.log = config.logger ?? noop;
     this.cursorStore = config.cursorStore;
-    this.streamKey = config.streamKey ?? "pulse-core-cursor";
+    this.network = config.network;
     this.cursorFailureThreshold = config.cursorFailureThreshold ?? 5;
   }
 
@@ -259,7 +259,12 @@ export class EventEngine {
       return false;
     }
 
-    this.openStream(false);
+    void this.openStream(false).catch((err) => {
+      this.log.error("[pulse-core] Failed to open SSE stream.", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      this.isRunning = false;
+    });
     return true;
   }
 
@@ -477,6 +482,96 @@ export class EventEngine {
     return status === 429;
   }
 
+  private getSourceStreamKey(source: "horizon" | "soroban"): string {
+    return `${source}:${this.network}`;
+  }
+
+  private async resolveStoredCursor(source: "horizon" | "soroban"): Promise<string> {
+    if (!this.cursorStore) {
+      return "now";
+    }
+
+    const key = this.getSourceStreamKey(source);
+    try {
+      const cursor = await this.cursorStore.get(key);
+      return cursor ?? "now";
+    } catch (err) {
+      this.log.warn("[pulse-core] cursorStore.get() failed; starting from now.", {
+        key,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return "now";
+    }
+  }
+
+  private async persistStreamCursor(source: "horizon" | "soroban", cursor: string): Promise<void> {
+    if (!this.cursorStore) {
+      return;
+    }
+
+    const key = this.getSourceStreamKey(source);
+    try {
+      await this.cursorStore.set(key, cursor);
+      this.consecutiveCursorFailures = 0;
+      this.isCursorStoreUnhealthy = false;
+    } catch (err) {
+      this.handleCursorFailure(err, key);
+    }
+  }
+
+  private async openStream(isReconnect: boolean): Promise<void> {
+    this.closeStream();
+    this.clearReconnectTimer();
+    this.isRunning = true;
+    this.pendingReconnectSuccessAttempt = isReconnect
+      ? this.reconnectAttempt
+      : null;
+
+    const cursor = await this.resolveStoredCursor("horizon");
+    this.horizonCursor = cursor;
+
+    const callbacks: StreamCallbacks = {
+      onmessage: (record) => {
+        this.lastEventAt = new Date().toISOString();
+        if (this.pendingReconnectSuccessAttempt !== null) {
+          // Report the same attempt number that was emitted in engine.reconnecting.
+          const attempt = this.pendingReconnectSuccessAttempt;
+          this.pendingReconnectSuccessAttempt = null;
+          this.reconnectAttempt = 0;
+          this.log.info("[pulse-core] SSE reconnect succeeded.", { attempt });
+          this.notifyWatchers("engine.reconnected", {
+            type: "engine.reconnected",
+            attempt,
+            emittedAt: new Date().toISOString(),
+          });
+        }
+
+        const event = this.normalize(record);
+        if (!event) {
+          return;
+        }
+
+        this.lastEventAt = event.timestamp;
+        this.route(event);
+
+        const recordCursor = this.getStringField(record as Record<string, unknown>, "paging_token");
+        if (recordCursor !== null) {
+          void this.persistStreamCursor("horizon", recordCursor);
+        }
+      },
+      onerror: (error) => {
+        const wrappedError = error instanceof HorizonStreamError ? error : new HorizonStreamError(error);
+        this.log.error("[pulse-core] SSE error.", { error: wrappedError });
+        this.handleStreamError(wrappedError);
+      },
+    };
+
+    this.stopStream = this.server
+      .operations()
+      .cursor(cursor)
+      .stream(callbacks);
+  }
+
   private isRecord(value: unknown): value is Record<string, unknown> {
     return typeof value === "object" && value !== null;
   }
@@ -615,10 +710,10 @@ export class EventEngine {
     }
   }
 
-  private handleCursorFailure(err: unknown): void {
+  private handleCursorFailure(err: unknown, key: string): void {
     this.consecutiveCursorFailures++;
     this.log.warn("[pulse-core] cursorStore.set() failed.", {
-      key: this.streamKey,
+      key,
       consecutiveFailures: this.consecutiveCursorFailures,
       error: err instanceof Error ? err.message : String(err),
     });
