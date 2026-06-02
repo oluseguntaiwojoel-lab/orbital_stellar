@@ -218,3 +218,7 @@ export function useStellarHistory<T extends NormalizedEvent = NormalizedEvent>(
 
   return { ...base, history };
 }
+
+// DevTools
+export { __OrbitalDevTools } from "./devtools.js";
+export type { DevToolsConnection } from "./devtools.js";
