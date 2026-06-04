@@ -204,6 +204,9 @@ export {
 } from "./StellarConnectionStatus.js";
 export { DevToolsPanel } from "./devtools.js";
 
+export { pulseNotifyVitePlugin } from "./vitePlugin.js";
+export type { PulseNotifyVitePlugin } from "./vitePlugin.js";
+
 export type UseHistoryOptions = {
   token?: string;
   /** Maximum number of events to retain in FIFO order. Defaults to 100. */
